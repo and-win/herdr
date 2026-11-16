@@ -96,6 +96,7 @@ impl ClientShellState {
             search_current_global: None,
             search_generation: 0,
             copy_after_search: false,
+            copy_after_search_stays: false,
         });
         self.mode = ClientShellMode::Copy;
         true
@@ -128,6 +129,7 @@ impl ClientShellState {
                         copy_mode.search_current_global = None;
                         copy_mode.search_generation = copy_mode.search_generation.saturating_add(1);
                         copy_mode.copy_after_search = false;
+                        copy_mode.copy_after_search_stays = false;
                     }
                     self.selection = None;
                 } else {
@@ -137,7 +139,7 @@ impl ClientShellState {
                 return;
             }
             KeyCode::Enter => {
-                if !self.defer_copy_until_search_result() {
+                if !self.defer_copy_until_search_result(false) {
                     self.exit_copy_mode(true, outcome);
                 }
                 return;
@@ -205,8 +207,8 @@ impl ClientShellState {
         match command {
             'q' => self.exit_copy_mode(false, outcome),
             'y' => {
-                if !self.defer_copy_until_search_result() {
-                    self.exit_copy_mode(true, outcome);
+                if !self.defer_copy_until_search_result(true) {
+                    self.copy_selection_in_place(outcome);
                 }
             }
             'v' | ' ' => self.begin_copy_selection(false),
@@ -358,7 +360,7 @@ impl ClientShellState {
         self.request_copy_search(copy_mode.search_query.clone(), direction, true, outcome);
     }
 
-    fn defer_copy_until_search_result(&mut self) -> bool {
+    fn defer_copy_until_search_result(&mut self, stay: bool) -> bool {
         let Some(copy_mode) = self.copy_mode.as_ref() else {
             return false;
         };
@@ -380,6 +382,7 @@ impl ClientShellState {
         if pending {
             if let Some(copy_mode) = self.copy_mode.as_mut() {
                 copy_mode.copy_after_search = true;
+                copy_mode.copy_after_search_stays = stay;
             }
         }
         pending
@@ -444,13 +447,18 @@ impl ClientShellState {
         } else {
             std::mem::take(&mut copy_mode.copy_after_search)
         };
+        let copy_after_search_stays = std::mem::take(&mut copy_mode.copy_after_search_stays);
         if let Some(target) = target {
             copy_mode.cursor = target.start;
             self.reveal_copy_cursor(outcome, true);
             self.sync_copy_selection();
         }
         if copy_after_search {
-            self.exit_copy_mode(true, outcome);
+            if copy_after_search_stays {
+                self.copy_selection_in_place(outcome);
+            } else {
+                self.exit_copy_mode(true, outcome);
+            }
         }
         outcome.repaint = true;
         true
@@ -491,6 +499,7 @@ impl ClientShellState {
             .filter(|copy_mode| copy_mode.search_generation == generation)
         {
             copy_mode.copy_after_search = false;
+            copy_mode.copy_after_search_stays = false;
         }
     }
 
@@ -810,12 +819,14 @@ impl ClientShellState {
         true
     }
 
-    pub(super) fn exit_copy_mode(&mut self, copy: bool, outcome: &mut ClientShellInput) {
+    /// Without a visible selection, fall back to the current search match.
+    /// Returns whether the selection was already live before the fallback.
+    fn select_search_match_for_copy(&mut self) -> bool {
         let live_selection = self
             .selection
             .as_ref()
             .is_some_and(crate::selection::Selection::is_visible);
-        if copy && !live_selection {
+        if !live_selection {
             if let Some((pane_id, text_match)) = self.copy_mode.as_ref().and_then(|copy_mode| {
                 copy_mode
                     .search_current
@@ -829,6 +840,40 @@ impl ClientShellState {
                 ));
             }
         }
+        live_selection
+    }
+
+    /// Copy the selection (or current search match) and stay in copy mode,
+    /// like tmux `copy-selection`. The selection is cleared so the next `v`
+    /// starts fresh; the cursor and scroll position are kept.
+    pub(super) fn copy_selection_in_place(&mut self, outcome: &mut ClientShellInput) {
+        if self.copy_mode.is_none() {
+            return;
+        }
+        let live_selection = self.select_search_match_for_copy();
+        if self
+            .selection
+            .as_ref()
+            .is_some_and(crate::selection::Selection::is_visible)
+        {
+            self.request_selection_copy(outcome, live_selection);
+        }
+        if let Some(copy_mode) = self.copy_mode.as_mut() {
+            copy_mode.selection = None;
+        }
+        self.selection = None;
+        self.selection_highlight_clear_deadline = None;
+        outcome.repaint = true;
+    }
+
+    pub(super) fn exit_copy_mode(&mut self, copy: bool, outcome: &mut ClientShellInput) {
+        let live_selection = if copy {
+            self.select_search_match_for_copy()
+        } else {
+            self.selection
+                .as_ref()
+                .is_some_and(crate::selection::Selection::is_visible)
+        };
         let Some(copy_mode) = self.copy_mode.take() else {
             return;
         };

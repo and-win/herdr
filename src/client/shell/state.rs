@@ -854,6 +854,8 @@ pub(super) struct ClientCopyModeState {
     pub(super) search_current_global: Option<u64>,
     pub(super) search_generation: u64,
     pub(super) copy_after_search: bool,
+    /// The deferred copy keeps copy mode open (`y`) instead of leaving it (`Enter`).
+    pub(super) copy_after_search_stays: bool,
 }
 
 pub(crate) struct ClientShellState {
@@ -1778,6 +1780,7 @@ impl ClientShellState {
                     copy_mode.search_current_global = None;
                     copy_mode.search_generation = copy_mode.search_generation.saturating_add(1);
                     copy_mode.copy_after_search = false;
+                    copy_mode.copy_after_search_stays = false;
                 }
                 if let Some(scroll) = pane.scroll {
                     let actual_offset =

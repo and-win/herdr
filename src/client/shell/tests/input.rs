@@ -612,7 +612,7 @@ fn highlighted_search_match_copies_after_in_flight_repeat() {
     let repeat_id = request.id.clone();
 
     let early_copy = state.handle_raw_events(vec![RawInputEvent::Key(
-        crate::input::TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()),
+        crate::input::TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()),
     )]);
     assert!(early_copy.actions.is_empty());
     assert_eq!(state.mode, ClientShellMode::Copy);

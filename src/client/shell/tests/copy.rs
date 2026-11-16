@@ -40,6 +40,7 @@ fn pasted_help_and_copy_queries_normalize_single_line_text() {
         search_current_global: None,
         search_generation: 0,
         copy_after_search: false,
+        copy_after_search_stays: false,
     });
 
     assert!(state.insert_copy_search_text("needle\r\n"));
@@ -497,7 +498,7 @@ fn keyboard_copy_mode_owns_cursor_selection_copy_and_scroll_restore() {
         .is_some_and(crate::selection::Selection::is_visible));
 
     let copy = state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
-        KeyCode::Char('y'),
+        KeyCode::Enter,
         KeyModifiers::empty(),
     ))]);
     assert_eq!(state.mode, ClientShellMode::Terminal);
@@ -559,7 +560,7 @@ fn keyboard_selections_survive_output_and_copy_live_ranges() {
             range
         );
 
-        let copied = state.handle_input_bytes(b"y");
+        let copied = state.handle_input_bytes(b"\r");
         assert!(copied.actions.iter().any(|action| matches!(
             action,
             ClientShellAction::Endpoint { request, .. }
@@ -2098,7 +2099,64 @@ fn reentering_copy_mode_on_the_same_pane_is_a_no_op() {
 }
 
 #[test]
-fn copy_waits_for_endpoint_motion_before_copying_selection() {
+fn y_copies_selection_and_stays_in_copy_mode() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    let mut pane_surface = surface();
+    pane_surface.panes[0].scroll = Some(crate::protocol::PaneSurfaceScrollMetrics {
+        offset_from_bottom: 0,
+        max_offset_from_bottom: 0,
+        viewport_rows: 2,
+    });
+    state.set_pane_surface(pane_surface);
+    state.compose(106, 20).expect("composed frame");
+    state.handle_input_bytes(b"\x02[");
+    state.handle_input_bytes(b"vk");
+    let range = state
+        .selection
+        .as_ref()
+        .expect("selected range")
+        .ordered_cells();
+    let cursor = state.copy_mode.as_ref().expect("copy mode").cursor;
+
+    let copied = state.handle_input_bytes(b"y");
+    assert!(copied.actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::Endpoint { request, .. }
+            if matches!(&request.method, crate::api::schema::Method::PaneSelectionRead(params)
+                if (params.anchor.row, params.anchor.col) == range.0
+                    && (params.cursor.row, params.cursor.col) == range.1)
+    )));
+    // Staying means no scroll restore and no mode change.
+    assert!(!copied.actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::Endpoint { request, .. }
+            if matches!(&request.method, crate::api::schema::Method::PaneScroll(_))
+    )));
+    assert_eq!(state.mode, ClientShellMode::Copy);
+    let copy_mode = state.copy_mode.as_ref().expect("still in copy mode");
+    assert!(copy_mode.selection.is_none());
+    assert_eq!(copy_mode.cursor, cursor);
+    assert!(state.selection.is_none());
+
+    // A second selection can be started and copied right away.
+    state.handle_input_bytes(b"vj");
+    assert!(state.selection.is_some());
+    let again = state.handle_input_bytes(b"y");
+    assert!(again.actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::Endpoint { request, .. }
+            if matches!(&request.method, crate::api::schema::Method::PaneSelectionRead(_))
+    )));
+    assert_eq!(state.mode, ClientShellMode::Copy);
+
+    state.handle_input_bytes(b"q");
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+    assert!(state.copy_mode.is_none());
+}
+
+#[test]
+fn y_queued_behind_motion_copies_and_stays() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));
     let mut pane_surface = surface();
@@ -2118,6 +2176,58 @@ fn copy_waits_for_endpoint_motion_before_copying_selection() {
     let origin = state.copy_mode.as_ref().expect("copy mode").cursor;
     let motion = state.handle_input_bytes(b"w");
     let queued_copy = state.handle_input_bytes(b"y");
+    assert!(queued_copy.actions.is_empty());
+    let motion_id = match &motion.actions[0] {
+        ClientShellAction::Endpoint { request, .. } => request.id.clone(),
+        _ => unreachable!(),
+    };
+    let target = crate::api::schema::PaneTextPoint {
+        row: origin.row,
+        col: 2,
+    };
+    let (_, actions) = state.handle_endpoint_result(
+        "boot-1",
+        &motion_id,
+        Ok(crate::api::schema::ResponseResult::PaneCopyMotion {
+            pane_id: "pane_1".into(),
+            cursor: target,
+            content_revision: 0,
+        }),
+    );
+    assert_eq!(state.mode, ClientShellMode::Copy);
+    assert!(state.selection.is_none());
+    assert!(actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::Endpoint { request, .. }
+            if matches!(
+                &request.method,
+                crate::api::schema::Method::PaneSelectionRead(params)
+                    if params.anchor == origin && params.cursor == target
+            )
+    )));
+}
+
+#[test]
+fn copy_waits_for_endpoint_motion_before_copying_selection() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    let mut pane_surface = surface();
+    pane_surface.panes[0].scroll = Some(crate::protocol::PaneSurfaceScrollMetrics {
+        offset_from_bottom: 0,
+        max_offset_from_bottom: 0,
+        viewport_rows: 2,
+    });
+    state.set_pane_surface(pane_surface);
+    state.compose(106, 20).expect("composed frame");
+    let mut enter = ClientShellInput::default();
+    state.record_binding(
+        crate::input::KeybindMatch::Action(crate::input::KeybindAction::CopyMode),
+        &mut enter,
+    );
+    state.handle_input_bytes(b"v");
+    let origin = state.copy_mode.as_ref().expect("copy mode").cursor;
+    let motion = state.handle_input_bytes(b"w");
+    let queued_copy = state.handle_input_bytes(b"\r");
     assert!(queued_copy.actions.is_empty());
     let motion_id = match &motion.actions[0] {
         ClientShellAction::Endpoint { request, .. } => request.id.clone(),
