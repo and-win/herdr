@@ -2099,6 +2099,50 @@ fn reentering_copy_mode_on_the_same_pane_is_a_no_op() {
 }
 
 #[test]
+fn alt_direct_bindings_run_in_copy_mode() {
+    let mut config = Config::default();
+    config.keys.new_tab = crate::config::BindingConfig::one("alt+t");
+    config.ui.prompt_new_tab_name = false;
+    config.keys.focus_pane_left = crate::config::BindingConfig::one("alt+h");
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(snapshot()));
+    let mut pane_surface = surface();
+    pane_surface.panes[0].scroll = Some(crate::protocol::PaneSurfaceScrollMetrics {
+        offset_from_bottom: 0,
+        max_offset_from_bottom: 0,
+        viewport_rows: 2,
+    });
+    state.set_pane_surface(pane_surface);
+    state.compose(106, 20).expect("composed frame");
+    state.handle_input_bytes(b"\x02[");
+    state.handle_input_bytes(b"l");
+    let cursor = state.copy_mode.as_ref().expect("copy mode").cursor;
+
+    // An alt direct binding runs its action instead of a copy-mode command.
+    let tab = state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Char('t'),
+        KeyModifiers::ALT,
+    ))]);
+    assert!(tab.actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::Endpoint { request, .. }
+            if matches!(&request.method, crate::api::schema::Method::TabCreate(_))
+    )));
+
+    // alt+h is bound, so it must not fall through to the bare `h` motion.
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Char('h'),
+        KeyModifiers::ALT,
+    ))]);
+    assert_eq!(state.copy_mode.as_ref().expect("copy mode").cursor, cursor);
+    assert_eq!(state.mode, ClientShellMode::Copy);
+
+    // Plain keys still belong to copy mode.
+    state.handle_input_bytes(b"h");
+    assert_ne!(state.copy_mode.as_ref().expect("copy mode").cursor, cursor);
+}
+
+#[test]
 fn y_copies_selection_and_stays_in_copy_mode() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));

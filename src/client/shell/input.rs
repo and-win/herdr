@@ -722,14 +722,22 @@ impl ClientShellState {
                 None
             }
             ClientShellMode::Copy => {
-                if self
+                let no_search_prompt = self
                     .copy_mode
                     .as_ref()
-                    .is_none_or(|copy_mode| copy_mode.search_prompt.is_none())
-                    && self.config.keybinds.matches_prefix(key)
-                {
+                    .is_none_or(|copy_mode| copy_mode.search_prompt.is_none());
+                if no_search_prompt && self.config.keybinds.matches_prefix(key) {
                     self.mode = ClientShellMode::Prefix;
                     outcome.repaint = true;
+                } else if let Some(binding) = (no_search_prompt
+                    && key.modifiers.contains(KeyModifiers::ALT))
+                .then(|| crate::input::resolve_direct_binding(&self.config.keybinds.keybinds, key))
+                .flatten()
+                {
+                    // Copy mode has no alt commands of its own, so alt direct bindings
+                    // (alt+hjkl focus, workspace and agent switching) keep working.
+                    // Leaving the pane leaves copy mode dormant; returning resumes it.
+                    self.record_binding(binding, outcome);
                 } else {
                     self.route_copy_mode_key(key, outcome);
                 }
